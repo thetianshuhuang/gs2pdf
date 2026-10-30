@@ -1,0 +1,50 @@
+[project]
+name = "gs2pdf"
+version = "0.1.0"
+description = "Download Google Slides diagrams as transparent, tightly cropped PDFs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pikepdf>=9,<11",
+    "pillow>=11",
+    "pymupdf>=1.25,<2",
+]
+
+[project.scripts]
+gs2pdf = "gs2pdf.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.17.3",
+]
+
+[tool.uv.build-backend]
+source-include = ["uv.lock", "VALIDATION.md", "tests/**", ".python-version"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 80
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "N", "I", "D", "NPY"
+]
+
+ignore = [
+    "D102",  # Inheriting docstrings is allowed
+    "D107",  # Initializer goes in the class docstring
+    "D401",  # "Imperative mood" NLP doesn't always make sense
+
+    # Must pick one...
+    "D213",  # Pick 'multi-line-summary-first-line'.
+    "D203",  # Pick `no-blank-line-before-class`.
+]
+
