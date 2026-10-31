@@ -11,6 +11,12 @@ from gs2pdf.convert import convert_pdf, select_slides
 from gs2pdf.errors import GS2PDFError
 
 
+def font_data(doc, xref):
+    """Return the embedded font file for a font object."""
+    *_, content = doc.extract_font(xref)
+    return content
+
+
 @pytest.mark.parametrize("shape", ["rectangle", "ellipse"])
 def test_output_has_no_added_margin(tmp_path, shape):
     """Crop every edge flush to artwork, including curved diagrams."""
@@ -23,7 +29,7 @@ def test_output_has_no_added_margin(tmp_path, shape):
         else:
             page.draw_oval(bounds, color=None, fill=(1, 0, 0))
         doc.save(source)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert not result.failed
     with pymupdf.open(result.written[0]) as doc:
         page = doc[0]
@@ -53,10 +59,10 @@ def test_colored_background_white_shapes_fonts_images_and_vectors(tmp_path):
         png = io.BytesIO()
         Image.new("RGBA", (8, 8), (0, 200, 0, 128)).save(png, format="PNG")
         page.insert_image(pymupdf.Rect(70, 70, 80, 80), stream=png.getvalue())
-        expected_font = doc.extract_font(page.get_fonts()[0][0])[3]
+        expected_font = font_data(doc, page.get_fonts()[0][0])
         doc.save(source)
     output = tmp_path / "out"
-    result = convert_pdf(source, output, report=lambda _: None)
+    result = convert_pdf(source, output)
     assert not result.failed
     with pymupdf.open(result.written[0]) as doc:
         page = doc[0]
@@ -64,7 +70,7 @@ def test_colored_background_white_shapes_fonts_images_and_vectors(tmp_path):
         assert page.rect.height == pytest.approx(60, abs=0.24)
         assert "Diagram" in page.get_text()
         assert expected_font in [
-            doc.extract_font(font[0])[3] for font in page.get_fonts(full=True)
+            font_data(doc, font[0]) for font in page.get_fonts(full=True)
         ]
         assert len(page.get_images()) == 1
         assert len(page.get_drawings()) >= 2
@@ -74,9 +80,11 @@ def test_colored_background_white_shapes_fonts_images_and_vectors(tmp_path):
 
 
 def test_google_polygon_coordinates_and_invisible_fills(pdf_factory, tmp_path):
-    # The same structure as Google's real PDF export: reflected coordinates,
-    # large source units, polygon rectangles, page clip, and zero-alpha shapes.
-    """Handle the path and graphics-state patterns in Slides exports."""
+    """Handle the path and graphics-state patterns in Slides exports.
+
+    Mirrors Google's real PDF export: reflected coordinates, large source
+    units, polygon rectangles, page clip, and zero-alpha shapes.
+    """
     resources = pikepdf.Dictionary(
         ExtGState=pikepdf.Dictionary(
             Invisible=pikepdf.Dictionary(ca=0, CA=0),
@@ -97,7 +105,7 @@ def test_google_polygon_coordinates_and_invisible_fills(pdf_factory, tmp_path):
         ],
         resources=resources,
     )
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert not result.failed
     with pymupdf.open(result.written[0]) as doc:
         assert doc[0].rect.width < 90
@@ -108,7 +116,7 @@ def test_transparent_foreground_and_small_clipped_fill_are_preserved(
 ):
     """Keep a full-sized fill restricted by a smaller diagram clip."""
     source = pdf_factory([b"q 40 30 80 60 re W n 1 1 1 rg 0 0 200 120 re f Q"])
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert not result.failed
     with pymupdf.open(result.written[0]) as doc:
         assert doc[0].rect.width < 82
@@ -142,7 +150,7 @@ def test_edges_thin_lines_arrows_shadows_and_rotation(tmp_path, rotation):
         )
         page.set_rotation(rotation)
         doc.save(source)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert not result.failed
     with pymupdf.open(result.written[0]) as doc:
         page = doc[0]
@@ -162,7 +170,7 @@ def test_selection_empty_overwrite_and_partial_failure(pdf_factory, tmp_path):
         ]
     )
     output = tmp_path / "out"
-    result = convert_pdf(source, output, report=lambda _: None)
+    result = convert_pdf(source, output)
     assert result.empty == [1]
     assert list(result.failed) == [3]
     assert [p.name for p in result.written] == [
@@ -170,7 +178,7 @@ def test_selection_empty_overwrite_and_partial_failure(pdf_factory, tmp_path):
         "slide-004.pdf",
     ]
     original = (output / "slide-002.pdf").read_bytes()
-    result = convert_pdf(source, output, slides="2", report=lambda _: None)
+    result = convert_pdf(source, output, slides="2")
     assert "already exists" in result.failed[2]
     assert (output / "slide-002.pdf").read_bytes() == original
     (output / "slide-002.pdf").write_bytes(b"existing output to replace")
@@ -179,7 +187,6 @@ def test_selection_empty_overwrite_and_partial_failure(pdf_factory, tmp_path):
         output,
         slides="2",
         overwrite=True,
-        report=lambda _: None,
     )
     assert not result.failed
     with pymupdf.open(output / "slide-002.pdf") as doc:
@@ -206,7 +213,7 @@ def test_shared_form_background_removed_only_for_selected_invocation(tmp_path):
                 b"/Shared Do q .2 0 0 .2 150 90 cm /Shared Do Q"
             )
         doc.save(source)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert not result.failed
     for path in result.written:
         with pymupdf.open(path) as doc:
@@ -237,7 +244,7 @@ def test_ambiguous_full_page_artwork_fails_safely(
 ):
     """Reject page-sized artwork that cannot be treated as background."""
     source = pdf_factory([stream], resources=resources)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert 1 in result.failed
     assert not result.written
 
@@ -251,7 +258,7 @@ def test_full_page_image_background_is_unsupported(tmp_path):
         Image.new("RGB", (20, 12), "green").save(data, format="PNG")
         page.insert_image(page.rect, stream=data.getvalue())
         doc.save(source)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert "image background" in result.failed[1]
 
 
@@ -273,7 +280,7 @@ def test_full_page_gradient_is_unsupported(pdf_factory, tmp_path):
             Shading=pikepdf.Dictionary(Gradient=shading)
         ),
     )
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert "gradient background" in result.failed[1]
     assert not result.written
 
@@ -312,9 +319,7 @@ def test_cannot_overwrite_input(pdf_factory, tmp_path):
     renamed = tmp_path / "slide-001.pdf"
     source.rename(renamed)
     before = renamed.read_bytes()
-    result = convert_pdf(
-        renamed, tmp_path, overwrite=True, report=lambda _: None
-    )
+    result = convert_pdf(renamed, tmp_path, overwrite=True)
     assert "input PDF" in result.failed[1]
     assert renamed.read_bytes() == before
 
@@ -327,7 +332,7 @@ def test_comments_do_not_expand_artwork_crop(tmp_path):
         page.draw_rect(pymupdf.Rect(40, 30, 80, 60), color=None, fill=(1, 0, 0))
         page.add_text_annot((170, 100), "Reviewer note")
         doc.save(source)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     assert not result.failed
     with pymupdf.open(result.written[0]) as doc:
         assert doc[0].rect.width < 46
@@ -364,7 +369,7 @@ def test_form_transform_clip_and_transparency(
         )
         page.Contents = doc.make_stream(b"/Diagram Do")
         doc.save(source)
-    result = convert_pdf(source, tmp_path / "out", report=lambda _: None)
+    result = convert_pdf(source, tmp_path / "out")
     if transparency:
         assert 1 in result.failed
         assert not result.written

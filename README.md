@@ -13,8 +13,8 @@ gs2pdf "https://docs.google.com/presentation/d/YOUR_PRESENTATION_ID/edit" --outp
 
 The package requires Python 3.11 or later; uv can provision a compatible Python.
 If the command is not on your PATH, run `uv tool update-shell` and open a new terminal.
-The package has not been published to PyPI, so install from the checkout or a built
-wheel rather than running `uv tool install gs2pdf`.
+The package is not on PyPI, so install from the checkout or a built wheel.
+Alternatively, run it without installing via `uv run gs2pdf …` inside the checkout.
 
 ## Google Slides access
 
@@ -22,26 +22,11 @@ In Google Slides, set **Share → General access → Anyone with the link → Vi
 and keep viewer downloads enabled in **Share → Settings**. Copy the presentation
 link and pass it to gs2pdf. See [Google's sharing instructions](https://support.google.com/drive/answer/7166529?hl=en).
 
-The tool downloads Google's PDF export anonymously over HTTPS. Links restricted
-to individual accounts or an organization that requires sign-in are unsupported.
-If the file is private or the owner disables downloads, the command explains
-which sharing settings are needed. Resource keys in sharing links are preserved.
-
-No browser, Google login, API keys, or Google Cloud setup is required. gs2pdf
-removes the solid slide background and crops the original PDF artwork, without
-SVG export or Inkscape.
-
-## Running from WSL or a server
-
-Run these commands in the checkout, including inside WSL:
-
-```bash
-uv sync --locked
-uv run gs2pdf "YOUR_GOOGLE_SLIDES_URL" --output-dir figures
-```
-
-No GUI or Chrome installation is needed. On WSL, open the output folder in Windows
-Explorer with `explorer.exe figures`.
+The tool downloads Google's PDF export anonymously over HTTPS, so no browser,
+Google login, or API key is required. Links restricted to individual accounts or
+an organization that requires sign-in are unsupported. If the file is private or
+the owner disables downloads, the command explains which sharing settings are
+needed. Resource keys in sharing links are preserved.
 
 ## Output and options
 
@@ -62,10 +47,9 @@ gs2pdf --help
 ```
 
 The default output directory is `figures`. Files are named `slide-001.pdf`,
-`slide-002.pdf`, and so on. Every output has zero added margin: the page fits
-directly to the detected artwork bounds, with no padding or guard pixels.
-Crop measurements use 300 DPI refined by PDF object bounds; the output itself
-is vector PDF, not a screenshot.
+`slide-002.pdf`, and so on. Each page is cropped flush to the artwork, measured
+at 300 DPI and refined by PDF object bounds; the output itself is vector PDF,
+not a screenshot.
 
 Empty slides are skipped. Existing files are preserved unless `--overwrite` is
 specified. Individual failures are reported and other slides continue. Exit status
@@ -121,4 +105,3 @@ uv tool install --editable .
 
 `uv build` produces a wheel and source distribution in `dist/`. Install the wheel
 with `uv tool install dist/gs2pdf-0.1.0-py3-none-any.whl`.
-See [validation notes](VALIDATION.md) for verified behavior and remaining limitations.

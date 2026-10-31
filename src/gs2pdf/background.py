@@ -6,10 +6,9 @@ Only the selected paint instruction is suppressed: never delete resources,
 white shapes, or a whole group containing other artwork.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field, replace
 from math import isclose
+from typing import Self
 
 import pikepdf
 
@@ -20,6 +19,11 @@ Point = tuple[float, float]
 FILL = {"f", "F", "f*", "B", "B*", "b", "b*"}
 STROKE = {"S", "s", "B", "B*", "b", "b*"}
 PAINT = FILL | STROKE | {"n"}
+
+
+def _as_box(values) -> Box:
+    x0, y0, x1, y1 = map(float, values)
+    return x0, y0, x1, y1
 
 
 def _box(points: list[Point]) -> Box:
@@ -53,9 +57,11 @@ class _Path:
 
     def add(self, op: str, operands, ctm: pikepdf.Matrix) -> None:
         if op == "m":
-            self.subpaths.append([ctm.transform(tuple(map(float, operands)))])
+            x, y = map(float, operands)
+            self.subpaths.append([ctm.transform((x, y))])
         elif op == "l" and self.subpaths:
-            self.subpaths[-1].append(ctm.transform(tuple(map(float, operands))))
+            x, y = map(float, operands)
+            self.subpaths[-1].append(ctm.transform((x, y)))
         elif op == "re":
             x, y, w, h = map(float, operands)
             self.subpaths.append(
@@ -137,7 +143,7 @@ class _State:
         if "/SMask" in gs and str(gs.SMask) != "/None":
             self.ordinary_blend = False
 
-    def for_form(self, obj) -> _State:
+    def for_form(self, obj) -> Self:
         child = replace(self)
         child.ctm = (
             pikepdf.Matrix(*map(float, obj.get("/Matrix", [1, 0, 0, 1, 0, 0])))
@@ -146,7 +152,7 @@ class _State:
         if "/BBox" in obj:
             child.clip = _intersect(
                 child.clip,
-                _transform_box(tuple(map(float, obj.BBox)), child.ctm),
+                _transform_box(_as_box(obj.BBox), child.ctm),
             )
         if obj.get("/Group", {}).get("/S") == pikepdf.Name.Transparency:
             child.ordinary_blend = False
@@ -201,6 +207,15 @@ def _path_mark(
     )
 
 
+def _image_mark(
+    state: _State, chain: tuple[int, ...], index: int
+) -> _Mark | None:
+    visible = _intersect(_transform_box((0, 0, 1, 1), state.ctm), state.clip)
+    if state.fill_alpha == 0 or not _nonempty(visible):
+        return None
+    return _Mark(chain, index, visible, reason="image background")
+
+
 def _xobject_mark(
     name, resources, state: _State, chain: tuple[int, ...], index: int
 ) -> _Mark | None:
@@ -214,14 +229,7 @@ def _xobject_mark(
             state.for_form(obj),
             chain + (index,),
         )
-    if state.fill_alpha > 0:
-        return _Mark(
-            chain,
-            index,
-            _intersect(_transform_box((0, 0, 1, 1), state.ctm), state.clip),
-            reason="image background",
-        )
-    return None
+    return _image_mark(state, chain, index)
 
 
 def _first_mark(
@@ -239,13 +247,9 @@ def _first_mark(
     pending_clip = False
     for index, instruction in enumerate(pikepdf.parse_content_stream(stream)):
         if isinstance(instruction, pikepdf.ContentStreamInlineImage):
-            if state.fill_alpha > 0 and _nonempty(state.clip):
-                return _Mark(
-                    chain,
-                    index,
-                    _transform_box((0, 0, 1, 1), state.ctm),
-                    reason="image background",
-                )
+            mark = _image_mark(state, chain, index)
+            if mark is not None:
+                return mark
             continue
         operands, operator = instruction
         op = str(operator)
@@ -318,12 +322,14 @@ def _rewrite(pdf: pikepdf.Pdf, stream, resources, mark: _Mark, depth: int = 0):
     resources = pikepdf.Dictionary(resources)
     if depth == len(mark.chain):
         # `n` ends the path and applies any pending clip, without painting.
-        instructions[mark.index] = ([], pikepdf.Operator("n"))
+        instructions[mark.index] = pikepdf.ContentStreamInstruction(
+            [], pikepdf.Operator("n")
+        )
     else:
         index = mark.chain[depth]
         operands, _ = instructions[index]
-        xobjects = pikepdf.Dictionary(resources.get("/XObject", {}))
-        original = xobjects[operands[0]]
+        xobjects = resources.get("/XObject", pikepdf.Dictionary()).copy()
+        original = xobjects[str(operands[0])]
         data, child_resources = _rewrite(
             pdf,
             original,
@@ -341,23 +347,25 @@ def _rewrite(pdf: pikepdf.Pdf, stream, resources, mark: _Mark, depth: int = 0):
             number += 1
         xobjects[name] = clone
         resources.XObject = xobjects
-        instructions[index] = ([name], pikepdf.Operator("Do"))
+        instructions[index] = pikepdf.ContentStreamInstruction(
+            [name], pikepdf.Operator("Do")
+        )
     return pikepdf.unparse_content_stream(instructions), resources
 
 
-def remove_background(pdf: pikepdf.Pdf, page: pikepdf.Page) -> bool:
-    """Remove one unambiguous background; return whether a fill was removed.
+def remove_background(pdf: pikepdf.Pdf, page: pikepdf.Page) -> None:
+    """Remove one unambiguous background, if the page has one.
 
     A full-page first mark that is not a plain opaque fill is an explicit
     unsupported case. Smaller first marks are treated as foreground on an
     already transparent page. Shared Form XObjects are cloned per invocation.
     """
-    box = tuple(map(float, page.cropbox))
+    box = _as_box(page.cropbox)
     state = _State(pikepdf.Matrix(), box)
     resources = page.resources
     mark = _first_mark(page, resources, state)
     if mark is None or not _same_box(mark.bounds, box):
-        return False
+        return
     if not mark.removable:
         raise BackgroundError(
             f"Cannot safely remove {mark.reason}; "
@@ -372,4 +380,3 @@ def remove_background(pdf: pikepdf.Pdf, page: pikepdf.Page) -> bool:
             "Multiple page-sized background layers are ambiguous; "
             "simplify the slide background first."
         )
-    return True

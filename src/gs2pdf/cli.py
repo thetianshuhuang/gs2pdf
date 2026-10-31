@@ -1,119 +1,77 @@
 """gs2pdf's console entry point."""
 
-from __future__ import annotations
-
-import argparse
+import io
 import math
 import sys
-import tempfile
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Annotated
+
+import tyro
 
 from . import __version__
+from .convert import convert_pdf
+from .download import download_presentation
 from .errors import GS2PDFError
 
 
-def _positive(value: str) -> float:
+def gs2pdf(
+    source: str,
+    /,
+    *,
+    output_dir: Path = Path("figures"),
+    slides: Annotated[str | None, tyro.conf.arg(metavar="RANGES")] = None,
+    overwrite: bool = False,
+    timeout: float = 90,
+) -> int:
+    """Download Google Slides diagrams as transparent, tightly cropped PDFs.
+
+    Args:
+        source: Publicly link-shared Google Slides URL or local PDF.
+        output_dir: Output directory.
+        slides: One-based slide numbers/ranges, e.g. 1,3-5; all if omitted.
+        overwrite: Replace existing output PDFs.
+        timeout: Timeout in seconds for each PDF download request.
+
+    """
+    if not math.isfinite(timeout) or timeout <= 0:
+        print("gs2pdf: --timeout must be finite and positive.", file=sys.stderr)
+        return 2
     try:
-        number = float(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError("must be a number") from None
-    if not math.isfinite(number) or number <= 0:
-        raise argparse.ArgumentTypeError("must be finite and greater than zero")
-    return number
-
-
-def parser() -> argparse.ArgumentParser:
-    """Build the command-line argument parser."""
-    result = argparse.ArgumentParser(
-        prog="gs2pdf",
-        description=(
-            "Download Google Slides diagrams as transparent, "
-            "tightly cropped PDFs."
-        ),
-    )
-    result.add_argument(
-        "source", help="publicly link-shared Google Slides URL or local PDF"
-    )
-    result.add_argument(
-        "--version", action="version", version=f"gs2pdf {__version__}"
-    )
-    result.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("figures"),
-        help="output directory (default: figures)",
-    )
-    result.add_argument(
-        "--slides",
-        help="one-based slide numbers/ranges, e.g. 1,3-5 (default: all)",
-    )
-    result.add_argument(
-        "--overwrite", action="store_true", help="replace existing output PDFs"
-    )
-    result.add_argument(
-        "--timeout",
-        type=_positive,
-        default=90,
-        metavar="SECONDS",
-        help="timeout for each PDF download request (default: 90)",
-    )
-    return result
-
-
-@contextmanager
-def _source_pdf(
-    args: argparse.Namespace, report: Callable[[str], None]
-) -> Iterator[Path]:
-    """Keep a downloaded PDF available for the duration of conversion."""
-    if urlparse(args.source).scheme.lower() not in {"http", "https"}:
-        source = Path(args.source).expanduser()
-        if not source.is_file():
-            raise GS2PDFError(f"Input PDF not found: {source}")
-        yield source
-        return
-
-    from .download import download_presentation
-
-    with tempfile.TemporaryDirectory(prefix="gs2pdf-") as temporary:
-        source = Path(temporary) / "presentation.pdf"
-        download_presentation(
-            args.source,
-            source,
-            timeout=args.timeout,
-            report=report,
+        if source.startswith(("http://", "https://")):
+            pdf = io.BytesIO(download_presentation(source, timeout=timeout))
+        else:
+            pdf = Path(source)
+        result = convert_pdf(
+            pdf, output_dir, slides=slides, overwrite=overwrite
         )
-        yield source
+    except (GS2PDFError, OSError) as exc:
+        print(f"gs2pdf: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("gs2pdf: cancelled.", file=sys.stderr)
+        return 130
+    print(
+        f"Saved {len(result.written)} PDF(s); "
+        f"{len(result.empty)} empty slide(s); "
+        f"{len(result.failed)} failed slide(s).",
+        file=sys.stderr,
+    )
+    return 1 if result.failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the command and return its exit status."""
-    args = parser().parse_args(argv)
-    from .convert import convert_pdf
-
-    def report(message: str) -> None:
-        print(message, file=sys.stderr)
-
-    try:
-        with _source_pdf(args, report) as source:
-            result = convert_pdf(
-                source,
-                args.output_dir.expanduser(),
-                slides=args.slides,
-                overwrite=args.overwrite,
-                report=report,
-            )
-        report(
-            f"Saved {len(result.written)} PDF(s); "
-            f"{len(result.empty)} empty slide(s); "
-            f"{len(result.failed)} failed slide(s)."
-        )
-        return 1 if result.failed else 0
-    except (GS2PDFError, OSError) as exc:
-        report(f"gs2pdf: {exc}")
-        return 1
-    except KeyboardInterrupt:
-        report("gs2pdf: cancelled.")
-        return 130
+    args = sys.argv[1:] if argv is None else argv
+    # tyro has no built-in version flag.
+    if args == ["--version"]:
+        print(f"gs2pdf {__version__}")
+        return 0
+    return tyro.cli(
+        gs2pdf,
+        prog="gs2pdf",
+        args=args,
+        config=(
+            tyro.conf.FlagCreatePairsOff,
+            tyro.conf.PositionalMetavarFromFieldName,
+        ),
+    )

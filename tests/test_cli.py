@@ -3,7 +3,9 @@
 import pikepdf
 import pytest
 
+from gs2pdf import cli, download
 from gs2pdf.cli import main
+from gs2pdf.errors import GS2PDFError
 
 
 def test_cli_success_and_partial_failure(pdf_factory, tmp_path, capsys):
@@ -16,8 +18,6 @@ def test_cli_success_and_partial_failure(pdf_factory, tmp_path, capsys):
 
 def test_cli_pdf_does_not_require_network(pdf_factory, tmp_path, monkeypatch):
     """Convert local PDFs without making network requests."""
-    from gs2pdf import download
-
     monkeypatch.setattr(
         download,
         "urlopen",
@@ -30,29 +30,22 @@ def test_cli_pdf_does_not_require_network(pdf_factory, tmp_path, monkeypatch):
 def test_cli_missing_input(tmp_path, capsys):
     """Report a missing local file with a failure exit status."""
     assert main([str(tmp_path / "missing.pdf")]) == 1
-    assert "Input PDF not found" in capsys.readouterr().err
+    assert "Cannot read PDF" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["nan", "-1", "0", "inf"])
+def test_cli_bad_timeout(value):
+    """Reject nonfinite, negative, or zero timeouts."""
+    assert main(["input.pdf", "--timeout", value]) == 2
 
 
 @pytest.mark.parametrize(
-    "option,value",
-    [
-        ("--timeout", "nan"),
-        ("--timeout", "-1"),
-        ("--timeout", "0"),
-        ("--timeout", "inf"),
-    ],
+    "argv", [[], ["input.pdf", "--timeout", "soon"], ["a.pdf", "--margin", "1"]]
 )
-def test_cli_bad_numbers(option, value):
-    """Reject nonfinite, negative, or zero numeric options."""
+def test_cli_invalid_arguments(argv):
+    """Exit with usage status for unparseable arguments."""
     with pytest.raises(SystemExit) as exc:
-        main(["input.pdf", option, value])
-    assert exc.value.code == 2
-
-
-def test_cli_cannot_add_margins():
-    """Reject the former margin option so output padding stays zero."""
-    with pytest.raises(SystemExit) as exc:
-        main(["input.pdf", "--margin", "2"])
+        main(argv)
     assert exc.value.code == 2
 
 
@@ -62,9 +55,7 @@ def test_help_and_version(capsys):
         main(["--help"])
     assert exc.value.code == 0
     assert "gs2pdf" in capsys.readouterr().out
-    with pytest.raises(SystemExit) as exc:
-        main(["--version"])
-    assert exc.value.code == 0
+    assert main(["--version"]) == 0
     assert capsys.readouterr().out.strip() == "gs2pdf 0.1.0"
 
 
@@ -82,23 +73,16 @@ def test_encrypted_input_has_readable_error(tmp_path, capsys, password):
 
 
 @pytest.mark.parametrize("download_fails", [False, True])
-def test_downloaded_source_lifetime(
-    pdf_factory, tmp_path, monkeypatch, download_fails
-):
-    """Keep downloads through conversion and delete them on success or error."""
-    from gs2pdf import download as downloader
-    from gs2pdf.errors import GS2PDFError
-
+def test_cli_downloads_urls(pdf_factory, tmp_path, monkeypatch, download_fails):
+    """Convert downloaded PDFs and report download failures."""
     source = pdf_factory([b"1 0 0 rg 40 30 80 60 re f"])
-    downloaded = []
 
-    def download(url, destination, **kwargs):
-        downloaded.append(destination)
+    def download(url, **kwargs):
         if download_fails:
             raise GS2PDFError("Download failed")
-        destination.write_bytes(source.read_bytes())
+        return source.read_bytes()
 
-    monkeypatch.setattr(downloader, "download_presentation", download)
+    monkeypatch.setattr(cli, "download_presentation", download)
     output = tmp_path / "out"
     status = main(
         [
@@ -109,5 +93,3 @@ def test_downloaded_source_lifetime(
     )
     assert status == int(download_fails)
     assert (output / "slide-001.pdf").exists() == (not download_fails)
-    assert len(downloaded) == 1
-    assert not downloaded[0].parent.exists()

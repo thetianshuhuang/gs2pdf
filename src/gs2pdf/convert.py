@@ -1,13 +1,11 @@
 """Split and crop PDFs, preserving the original page's vector content."""
 
-from __future__ import annotations
-
 import io
-import os
-import tempfile
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import BinaryIO
 
 import pikepdf
 import pymupdf
@@ -15,6 +13,10 @@ from PIL import Image
 
 from .background import remove_background
 from .errors import GS2PDFError
+
+_ENCRYPTED = (
+    "Encrypted PDFs are not supported; export an unencrypted PDF first."
+)
 
 
 @dataclass
@@ -31,23 +33,17 @@ def select_slides(selection: str | None, page_count: int) -> list[int]:
     if selection is None:
         return list(range(1, page_count + 1))
     numbers: set[int] = set()
-    try:
-        for part in selection.split(","):
-            ends = part.strip().split("-")
-            if not 1 <= len(ends) <= 2 or not all(
-                e.strip().isascii() and e.strip().isdigit() for e in ends
-            ):
-                raise ValueError
-            start = int(ends[0])
-            end = int(ends[-1])
-            if not 1 <= start <= end <= page_count:
-                raise ValueError
-            numbers.update(range(start, end + 1))
-    except ValueError:
-        raise GS2PDFError(
-            f"Invalid slide selection {selection!r}; "
-            f"use numbers/ranges within 1–{page_count}, e.g. 1,3-5."
-        ) from None
+    for part in selection.split(","):
+        match = re.fullmatch(r" *([0-9]+) *(?:- *([0-9]+) *)?", part)
+        start, end = (
+            (int(match[1]), int(match[2] or match[1])) if match else (0, 0)
+        )
+        if not 1 <= start <= end <= page_count:
+            raise GS2PDFError(
+                f"Invalid slide selection {selection!r}; "
+                f"use numbers/ranges within 1–{page_count}, e.g. 1,3-5."
+            )
+        numbers.update(range(start, end + 1))
     return sorted(numbers)
 
 
@@ -60,20 +56,10 @@ def _content_bounds(page: pymupdf.Page) -> pymupdf.Rect | None:
         )
     pix = page.get_pixmap(dpi=300, alpha=True, annots=False)
     image = Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
-    bounds = image.getchannel("A").getbbox()
-    if bounds is None:
+    pixels = image.getchannel("A").getbbox()
+    if pixels is None:
         return None
-    left, top, right, bottom = bounds
-    # Use the detected bounds directly, with no added padding.
-    clip = (
-        pymupdf.Rect(
-            left / scale,
-            top / scale,
-            right / scale,
-            bottom / scale,
-        )
-        & page.rect
-    )
+    clip = pymupdf.Rect(*(x / scale for x in pixels)) & page.rect
     # PDF object bounds remove raster rounding beyond the actual geometry.
     object_bounds = pymupdf.Rect()
     for kind, bounds in page.get_bboxlog():
@@ -108,51 +94,23 @@ def _convert_slide(page: pikepdf.Page) -> bytes | None:
     return _cropped_pdf(buffer.getvalue())
 
 
-def _write_output(path: Path, data: bytes, overwrite: bool) -> None:
-    if not overwrite:
-        # Exclusive creation also protects against another process racing us.
-        with path.open("xb") as handle:
-            try:
-                handle.write(data)
-            except BaseException:
-                path.unlink(missing_ok=True)
-                raise
-        return
-    # Replacing an existing PDF is atomic; a failed write keeps the old file.
-    fd, name = tempfile.mkstemp(
-        prefix=".gs2pdf-", suffix=".pdf", dir=path.parent
-    )
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
-
-
 def convert_pdf(
-    source: Path,
+    source: Path | BinaryIO,
     output_dir: Path,
     *,
     slides: str | None = None,
     overwrite: bool = False,
-    report: Callable[[str], None] = print,
 ) -> ConversionResult:
     """Remove backgrounds and export selected slides as cropped PDFs."""
     try:
         source_pdf = pikepdf.Pdf.open(source)
     except pikepdf.PasswordError as exc:
-        raise GS2PDFError(
-            "Encrypted PDFs are not supported; export an unencrypted PDF first."
-        ) from exc
+        raise GS2PDFError(_ENCRYPTED) from exc
     except (pikepdf.PdfError, OSError) as exc:
-        raise GS2PDFError(f"Cannot read PDF {source}: {exc}") from exc
+        raise GS2PDFError(f"Cannot read PDF: {exc}") from exc
     with source_pdf:
         if source_pdf.is_encrypted:
-            raise GS2PDFError(
-                "Encrypted PDFs are not supported; "
-                "export an unencrypted PDF first."
-            )
+            raise GS2PDFError(_ENCRYPTED)
         if not len(source_pdf.pages):
             raise GS2PDFError("The PDF contains no slides.")
         selected = select_slides(slides, len(source_pdf.pages))
@@ -165,7 +123,10 @@ def convert_pdf(
                     raise GS2PDFError(
                         f"{path} already exists; use --overwrite to replace it."
                     )
-                if path.resolve() == source.resolve():
+                if (
+                    isinstance(source, Path)
+                    and path.resolve() == source.resolve()
+                ):
                     raise GS2PDFError(
                         "Output would replace the input PDF; "
                         "choose a different output directory."
@@ -173,19 +134,18 @@ def convert_pdf(
                 data = _convert_slide(source_pdf.pages[number - 1])
                 if data is None:
                     result.empty.append(number)
-                    report(f"Slide {number}: empty; skipped.")
+                    print(f"Slide {number}: empty; skipped.", file=sys.stderr)
                     continue
-                _write_output(path, data, overwrite)
+                path.write_bytes(data)
                 result.written.append(path)
-                report(f"Slide {number}: {path}")
+                print(f"Slide {number}: {path}", file=sys.stderr)
             except (
                 GS2PDFError,
                 pikepdf.PdfError,
-                pymupdf.FileDataError,
                 OSError,
                 ValueError,
                 RuntimeError,
             ) as exc:
                 result.failed[number] = str(exc)
-                report(f"Slide {number}: failed: {exc}")
+                print(f"Slide {number}: failed: {exc}", file=sys.stderr)
         return result
